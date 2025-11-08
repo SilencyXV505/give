@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -106,6 +107,8 @@ public final class DSJoinBot {
         private volatile boolean hasSpawnPosition;
         private volatile boolean fallComplete;
         private volatile ScheduledFuture<?> fallTask;
+        private volatile ScheduledFuture<?> landingJitterTask;
+        private volatile int landingJitterTicksRemaining;
 
         private PhysicsController(Session session) {
             this.session = session;
@@ -172,6 +175,7 @@ public final class DSJoinBot {
             this.fallComplete = false;
             this.velocityY = 0;
             this.y = this.groundY + FALL_HEIGHT;
+            cancelLandingJitter();
 
             ScheduledFuture<?> currentTask = this.fallTask;
             if (currentTask != null && !currentTask.isDone()) {
@@ -202,6 +206,7 @@ public final class DSJoinBot {
                 if (onGround) {
                     fallComplete = true;
                     stopTask();
+                    scheduleLandingJitter();
                 }
             } catch (Throwable throwable) {
                 fallComplete = true;
@@ -218,11 +223,50 @@ public final class DSJoinBot {
             }
         }
 
+        private void scheduleLandingJitter() {
+            cancelLandingJitter();
+            landingJitterTicksRemaining = 8;
+            try {
+                landingJitterTask = scheduler.scheduleAtFixedRate(() -> {
+                    try {
+                        if (--landingJitterTicksRemaining <= 0) {
+                            cancelLandingJitter();
+                            return;
+                        }
+
+                        double offsetX = ThreadLocalRandom.current().nextDouble(-0.15, 0.15);
+                        double offsetZ = ThreadLocalRandom.current().nextDouble(-0.15, 0.15);
+
+                        x += offsetX;
+                        z += offsetZ;
+
+                        session.send(new ClientPlayerPositionPacket(true, x, y, z));
+                    } catch (Throwable throwable) {
+                        System.err.println("Landing jitter encountered an error: " + throwable.getMessage());
+                        cancelLandingJitter();
+                    }
+                }, TICK_INTERVAL_MS, TICK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+            } catch (Throwable throwable) {
+                System.err.println("Unable to schedule landing jitter: " + throwable.getMessage());
+                cancelLandingJitter();
+            }
+        }
+
+        private void cancelLandingJitter() {
+            ScheduledFuture<?> currentTask = this.landingJitterTask;
+            if (currentTask != null && !currentTask.isDone()) {
+                currentTask.cancel(false);
+            }
+            this.landingJitterTask = null;
+            this.landingJitterTicksRemaining = 0;
+        }
+
         void shutdown() {
             ScheduledFuture<?> currentTask = this.fallTask;
             if (currentTask != null) {
                 currentTask.cancel(true);
             }
+            cancelLandingJitter();
             scheduler.shutdownNow();
         }
     }
